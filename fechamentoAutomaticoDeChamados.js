@@ -1,4 +1,4 @@
-
+document.addEventListener('DOMContentLoaded', async function () {
   // token 
   function getAntiCsrfFromDom() {
     const el = document.querySelector('input[name="__RequestVerificationToken"]');
@@ -171,4 +171,4 @@ try {
 } catch (erro) {
   console.error("💥 Erro geral na execução:", erro);
 }
-
+});
