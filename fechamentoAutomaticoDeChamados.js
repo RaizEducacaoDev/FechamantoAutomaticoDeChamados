@@ -171,4 +171,4 @@ try {
 } catch (erro) {
   console.error("💥 Erro geral na execução:", erro);
 }
-});
+}); 
