@@ -37,7 +37,7 @@ document.addEventListener('DOMContentLoaded', async function () {
       }).then(r => r.ok ? r.json() : Promise.reject(r));
       const bearer = imp?.impersonate?.temporaryToken;
       if (!bearer) {
-         console.warn("⚠️ Bearer não encontrado — tentando continuar com sessão atual...");
+        console.warn("⚠️ Bearer não encontrado — tentando continuar com sessão atual...");
       }
       return bearer;
       
@@ -54,30 +54,61 @@ document.addEventListener('DOMContentLoaded', async function () {
     return h;
   }
 
-  // ?? tudo dentro do escopo async, agora o await é permitido
+  //  tudo dentro do escopo async, agora o await é permitido
   const anti = getAntiCsrfFromDom();
   const bearer = await getUserBearerToken(); 
   const headers = montarHeaders(anti, bearer);
+  const base = "https://hmlraizeducacao.zeev.it"  // (ajustado para ambiente de homologação) para que seja dinâmico adicione >> window.location.origin;
+  
 // URL base da API de tarefas
-const urlTarefas = `https://hmlraizeducacao.zeev.it/api/2/assignments/`;
+const urlTarefas = `${base}/api/2/assignments/`;
 
 try {
   // Buscar as tarefas
   const resposta = await fetch(urlTarefas, { method: "GET", headers, credentials: "include" });
   if (!resposta.ok) {
-    console.error("❌ Erro ao buscar tarefas:", resposta.status, resposta.statusText);
+    console.error(" Erro ao buscar tarefas:", resposta.status, resposta.statusText);
     return;
   }
 
   const dados = await resposta.json();
-  console.log("📦 Dados recebidos:", dados);
+  console.log(" Dados recebidos:", dados);
 
-  // Filtrar somente as tarefas "Avaliar atendimento"
-  const tarefasEncontradas = dados.filter(t => t.taskName?.trim() === "Avaliar atendimento");
-  if (tarefasEncontradas.length === 0) {
-    console.log("⚠️ Nenhuma tarefa 'Avaliar atendimento' encontrada.");
-    return;
-  }
+  // Função para verificar se a tarefa está atrasada há mais de 1 dia
+  function slaAtrasada(expirationDateTime, limiteEmDias = 1) {
+    if (!expirationDateTime) return false;
+
+    const dataExpiracao = new Date(expirationDateTime);
+    if (isNaN(dataExpiracao)) {
+      console.log(" Data de expiração inválida:", expirationDateTime);
+      return false;
+    }
+
+    const dataAtual = new Date();
+    const diferencaEmDias = (dataAtual - dataExpiracao) / (1000 * 60 * 60 * 24);
+
+    // Log detalhado da diferença
+    console.log(
+      ` Tarefa expira em: ${dataExpiracao.toLocaleString()} | Hoje: ${dataAtual.toLocaleString()} | ` +
+      `Diferença: ${diferencaEmDias.toFixed(2)} dias | Limite: ${limiteEmDias} dia(s)`
+    );
+
+    return diferencaEmDias > limiteEmDias;
+}
+
+  // Filtra apenas tarefas “Avaliar atendimento” atrasadas há mais de 1 dia
+    const tarefasEncontradas = dados.filter(t =>
+      t.taskName?.trim() === "Avaliar atendimento" &&
+      t.late === true &&
+      slaAtrasada(t.expirationDateTime)
+    );
+
+    if (tarefasEncontradas.length === 0) {
+      console.log(" Nenhuma tarefa 'Avaliar atendimento' com mais de 1 dia de atraso encontrada.");
+      return;
+    }
+
+    console.log(` ${tarefasEncontradas.length} tarefas encontradas com mais de 1 dia de atraso.`);
 
   // Configurações
   const tokenResponsavel = "087FJWX5jKVEHZs8BBa%2FOcf36SKh5gpE1FzOx7GSp6UrT0X5iq5ALc72%2Fv6RIfekiORiQ0PuaHZyq1PgUQ30qmy2EfvRo0Vjr0yx0xniRTUCCf4fU71U5KIMfxozTSh0";
@@ -87,11 +118,11 @@ try {
   for (const tarefa of tarefasEncontradas) {
     const idTarefa = tarefa.id;
     const emailResponsavel = tarefa.assignee?.email || "";
-    console.log(`🧩 Tarefa ${idTarefa} | responsável atual: ${emailResponsavel}`);
+    console.log(` Tarefa ${idTarefa} | responsável atual: ${emailResponsavel}`);
 
-    // -----------------------------------------------------------
+
     // ETAPA 1 — FORWARD (somente se o e-mail for DIFERENTE)
-    // -----------------------------------------------------------
+
     if (emailResponsavel !== emailParaVerificar) {
       const urlForward = `https://hmlraizeducacao.zeev.it/api/2/assignments/forward`;
       const corpoForward = {
@@ -114,26 +145,26 @@ try {
 
         if (!respForward.ok) {
           const erroTxt = await respForward.text();
-          console.error(`❌ Erro no forward da tarefa ${idTarefa}:`, erroTxt);
+          console.error(` Erro no forward da tarefa ${idTarefa}:`, erroTxt);
         } else {
-          console.log(`✅ Forward executado para a tarefa ${idTarefa}.`);
+          console.log(` Forward executado para a tarefa ${idTarefa}.`);
         }
       } catch (e) {
-        console.error(`💥 Falha no forward da tarefa ${idTarefa}:`, e);
+        console.error(` Falha no forward da tarefa ${idTarefa}:`, e);
       }
 
       // IMPORTANTE: pela sua regra, NÃO executa PUT aqui.
       continue;
     }
 
-    // -----------------------------------------------------------
+
     // ETAPA 2 — PUT (somente se o e-mail for IGUAL)
-    // -----------------------------------------------------------
+
     if (emailResponsavel === emailParaVerificar) {
       const urlPut = `https://hmlraizeducacao.zeev.it/api/2/assignments/${idTarefa}`;
       const corpoPut = {
         result: "3",
-        reason: "Tarefa concluída automaticamente via API"
+        reason: "Por motivo de SLA expirado estamos finalizando automaticamente a tarefa.",
       };
 
       try {
@@ -149,26 +180,26 @@ try {
         });
 
         if (respPut.status === 204) {
-          console.log(`✅ Tarefa ${idTarefa} concluída (204 No Content).`);
+          console.log(` Tarefa ${idTarefa} concluída (204 No Content).`);
           continue;
         }
 
         if (!respPut.ok) {
           const erroTxt = await respPut.text();
-          console.error(`❌ Erro ao concluir tarefa ${idTarefa}:`, erroTxt);
+          console.error(` Erro ao concluir tarefa ${idTarefa}:`, erroTxt);
           continue;
         }
 
         const ct = respPut.headers.get("content-type") || "";
         const retorno = ct.includes("application/json") ? await respPut.json() : await respPut.text();
-        console.log(`✅ PUT bem-sucedido para ${idTarefa}:`, retorno);
+        console.log(` PUT bem-sucedido para ${idTarefa}:`, retorno);
 
       } catch (e) {
-        console.error(`💥 Falha ao concluir tarefa ${idTarefa}:`, e);
+        console.error(` Falha ao concluir tarefa ${idTarefa}:`, e);
       }
     }
   }
 } catch (erro) {
-  console.error("💥 Erro geral na execução:", erro);
+  console.error(" Erro geral na execução:", erro);
 }
 }); 
