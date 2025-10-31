@@ -1,205 +1,282 @@
-document.addEventListener('DOMContentLoaded', async function () {
-  // token 
-  function getAntiCsrfFromDom() {
-    const el = document.querySelector('input[name="__RequestVerificationToken"]');
-    return el?.value?.trim() || null;
+import fetch from "node-fetch";
+import fs from "fs";
+import path from "path";
+import dotenv from "dotenv";
+dotenv.config();
+
+ 
+// 🔧 CONFIGURAÇÕES GERAIS
+ 
+const base = process.env.ZEEV_BASE;
+const tokenTicket = process.env.ZEEV_TOKEN_TICKET;
+const logFile = process.env.LOG_FILE || "automacao.log";
+
+const idUsuarioTicketRaiz = 4101;
+const emailTicketRaiz = "ticket.raiz@raizeducacao.com.br";
+
+// Delays (em milissegundos)
+const DELAY_TAREFA_MIN = 400;
+const DELAY_TAREFA_MAX = 800;
+const DELAY_USUARIO_MIN = 1000;
+const DELAY_USUARIO_MAX = 1800;
+
+ 
+// 🪵 SISTEMA DE LOG
+ 
+const logPath = path.resolve(logFile);
+function timestamp() {
+  return new Date().toISOString().replace("T", " ").replace("Z", "");
+}
+function log(msg, tipo = "INFO") {
+  const linha = `[${timestamp()}] [${tipo}] ${msg}`;
+  console.log(linha);
+  fs.appendFileSync(logPath, linha + "\n", "utf8");
+}
+
+ 
+// ⏱ DELAY COM JITTER ALEATÓRIO
+ 
+async function delay(min, max) {
+  const ms = Math.floor(Math.random() * (max - min + 1)) + min;
+  await new Promise(r => setTimeout(r, ms));
+}
+
+ 
+// 🔹 FUNÇÕES AUXILIARES
+ 
+
+// 1️⃣ Buscar tarefas “Avaliar atendimento” atrasadas
+async function buscarTarefasAtrasadas(tokenUser) {
+  let page = 1;
+  const tarefasAtrasadas = [];
+
+  while (true) {
+    const url = `${base}/api/2/assignments/?pageNumber=${page}`;
+    const resp = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${tokenUser}`,
+        Accept: "application/json"
+      }
+    });
+    if (!resp.ok) throw new Error(`Erro ao buscar tarefas (${resp.status})`);
+
+    const payload = await resp.json();
+
+    // A API pode retornar um array direto ou algo como { items: [...] }
+    const tarefas = Array.isArray(payload)
+      ? payload
+      : (Array.isArray(payload?.items) ? payload.items : []);
+
+    // *** Ponto de parada: quando vier vazio, acabou. ***
+    if (tarefas.length === 0) break;
+
+    // Filtro exato
+    for (const t of tarefas) {
+      if (t?.taskName?.trim() === "Avaliar atendimento" && t?.late === true) {
+        tarefasAtrasadas.push(t);
+      }
+    }
+
+    page++;
+    // (Opcional) proteção contra loop infinito:
+    if (page > 10000) throw new Error("Proteção: possível loop de paginação.");
   }
 
-  async function getUserBearerToken() {
+  return tarefasAtrasadas;
+}
+
+
+// 2️⃣ Gerar temporaryToken para um usuário específico
+async function getUserToken(userId) {
+  const url = `${base}/api/2/tokens/impersonate/${userId}`;
+  const resp = await fetch(url, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${tokenTicket}` }
+  });
+
+  if (!resp.ok) {
+    log(`❌ Falha ao impersonar usuário ${userId} (${resp.status})`, "ERRO");
+    return null;
+  }
+
+  const data = await resp.json();
+  return data?.impersonate?.temporaryToken || null;
+}
+
+// 3️⃣ Encaminhar tarefa (forward)
+async function forwardTarefa(tokenUser, tarefaId) {
+  const url = `${base}/api/2/assignments/forward`;
+  const body = {
+    newUserId: idUsuarioTicketRaiz,
+    assignmentsIds: [tarefaId],
+    message: "Reatribuição automática via API"
+  };
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${tokenUser}`,
+      Accept: "application/json",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!resp.ok) {
+    const txt = await resp.text();
+    throw new Error(`Erro no encaminhamento da tarefa ${tarefaId}: ${txt}`);
+  }
+
+  log(`✅ Encaminhamento da tarefa ${tarefaId} para o ticket.raiz realizado com sucesso.`);
+}
+
+// 4️⃣ Concluir tarefa automaticamente
+async function concluirTarefa(tokenUser, tarefaId) {
+  const url = `${base}/api/2/assignments/${tarefaId}`;
+  const body = {
+    result: "3",
+    reason: "SLA expirado — finalizada automaticamente via API."
+  };
+
+  const resp = await fetch(url, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${tokenUser}`,
+      Accept: "application/json",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (resp.status === 204) {
+    log(`✅ Tarefa ${tarefaId} concluída (204).`);
+  } else if (!resp.ok) {
+    const txt = await resp.text();
+    throw new Error(`Erro ao concluir ${tarefaId}: ${txt}`);
+  }
+}
+
+// 5️⃣ Listar e processar usuários por página
+async function processarUsuariosPorPagina() {
+  let pageNumber = 5;             // <<<<<<<<<<<<<<<          Modifique o número da página inicial aqui de acordo com sua necessidade se o código que contém uma ⭐ estiver comentado. Se não, deixe como 1.
+  const numeroDeUsuarios = 1000;
+
+  while (true) {
+    const url = `${base}/api/2/users?pageNumber=${pageNumber}`;
+    log(`🌐 Buscando usuários (pageNumber=${pageNumber})...`);
+
+    const resp = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${tokenTicket}`,
+        Accept: "application/json"
+      }
+    });
+
+    if (!resp.ok) {
+      log(`⚠️ Erro ao buscar pageNumber=${pageNumber} (${resp.status}).`, "WARN");
+      break;
+    }
+
+    const data = await resp.json();
+    if (!Array.isArray(data) || data.length === 0) {
+      log(`📘 Nenhum usuário retornado na página ${pageNumber}) — fim da paginação.`);
+      break;
+    }
+
+    log(`📄 Página ${pageNumber}: ${data.length} usuários retornados.`);
+    log(`🧮 Iniciando processamento de ${data.length} usuários...`);
+
+    for (const u of data) {
+      if (!u?.isActive) continue;
+      if (u.email === emailTicketRaiz) continue;
+
+      const { id, username, email } = u;
+      log(`🔹 Verificando usuário: ${username || id} (${email || "sem email"})`);
+
+      const tokenUser = await getUserToken(id);
+      if (!tokenUser) {
+        log(`⚠️ Falha ao impersonar ${email || id}`, "WARN");
+        await delay(DELAY_USUARIO_MIN, DELAY_USUARIO_MAX);
+        continue;
+      }
+
+      const tarefas = await buscarTarefasAtrasadas(tokenUser);
+      if (!tarefas?.length) {
+        log("ℹ️ Nenhuma tarefa 'Avaliar atendimento' atrasada.");
+        await delay(DELAY_USUARIO_MIN, DELAY_USUARIO_MAX);
+        continue;
+      }
+
+      log(`📋 ${tarefas.length} tarefas "Avaliar atendimento" atrasadas encontradas.`);
+      for (const tarefa of tarefas) {
+        await forwardTarefa(tokenUser, tarefa.id);
+        await delay(DELAY_TAREFA_MIN, DELAY_TAREFA_MAX);
+      }
+
+      await delay(DELAY_USUARIO_MIN, DELAY_USUARIO_MAX);
+    }
+    /* // ⭐ PARA QUE PERCORRAR TODAS AS PÁGINAS EXISTENTES DE UMA VEZ, DESCOMENTE ESTE TRECHO:
+    
+    if (data.length < 1) {
+      log(`📘 Página ${pageNumber} retornou ${data.length} usuários. Fim da paginação.`);
+      break; 
+    }
+    
+    */ 
+
+    if (data.length < numeroDeUsuarios) {
+      log(`📘 Página ${pageNumber} retornou ${data.length} usuários (<=${numeroDeUsuarios}). Fim da paginação.`);
+      break; 
+    }
+
+    pageNumber++;
+    await delay(500, 1000);
+  }
+}
+
+ 
+// 🔹 EXECUÇÃO PRINCIPAL
+ 
+async function main() {
+  log("🚀 Iniciando automação com token do ticket.raiz...");
+  try {
+    await processarUsuariosPorPagina();
+
+    // Processa o ticket.raiz no final (sem impersonate)
+    log("🏁 Iniciando etapa final: conclusão automática de tarefas de 'Avaliar antendimento' do ticket.raiz...");
+
     try {
-      const base = window.location.origin;
-      const userId = Number(document.querySelector('#userId')?.value?.match(/\d+$/)?.[0]);
-      if (!Number.isFinite(userId)) throw new Error('ID do usuário não encontrado.');
+      const urlUsuarios = `${base}/api/2/users`;
+      const resp = await fetch(urlUsuarios, {
+        headers: { Authorization: `Bearer ${tokenTicket}` }
+      });
+      const usuarios = await resp.json();
+      const usuarioTicket = usuarios.find(u => u.email === emailTicketRaiz);
 
-      const dsKey = base.includes('hml')
-        ? 'yjbbrV4FLfJUDeTgo97d3CmCz9CCIBqtlH2OupdGmAiSrUr8-LKFdChlE37fCDRMhGf@-i0xUw8t9Pl8mXHU6w__'
-        : 'DDwgBioycx75M0IiEFF-sdk0HwdR17CgcklxG-9Wy5WHeAyX4eV9pCstsjxLBqOYG2SnaXgEA6YhPK1R8LpVdw__';
+      /*if (usuarioTicket) {
+        log("✅ Usuário ticket.raiz encontrado entre os ativos.");
+      } else {
+        log("⚠️ Usuário ticket.raiz não encontrado entre os ativos. Prosseguindo com o token do .env.", "WARN");
+      }*/
 
-      // 1) token da datasource
-      const ds = await fetch(`https://hmlraizeducacao.zeev.it/api/internal/legacy/1.0/datasource/get/1.0/${dsKey}`, {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include'
-      }).then(r => r.ok ? r.json() : Promise.reject(r));
-      const apiToken = ds?.success?.[0]?.cod;
-      if (!apiToken) throw new Error('apiToken ausente');
-      console.log('dsKey usado:', dsKey);
-      console.log("🔍 Buscando datasource em:", `https://hmlraizeducacao.zeev.it/api/internal/legacy/1.0/datasource/get/1.0/${dsKey}`);
-      console.log("📦 Resposta bruta:", ds);
-
-
-
-      // 2) token temporário (impersonate)
-      const imp = await fetch(`https://hmlraizeducacao.zeev.it/api/2/tokens/impersonate/${userId}`, {
-        method: 'GET',
-        headers: { 'Authorization': `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
-        credentials: 'include'
-      }).then(r => r.ok ? r.json() : Promise.reject(r));
-      const bearer = imp?.impersonate?.temporaryToken;
-      if (!bearer) {
-        console.warn("⚠️ Bearer não encontrado — tentando continuar com sessão atual...");
+      const tarefasRaiz = await buscarTarefasAtrasadas(tokenTicket);
+      if (!tarefasRaiz?.length) {
+        log("ℹ️ Nenhuma tarefa atrasada atribuída ao ticket.raiz.");
+      } else {
+        log(`📬 ${tarefasRaiz.length} tarefas atrasadas encontradas com ticket.raiz.`);
+        for (const tarefa of tarefasRaiz) {
+          await concluirTarefa(tokenTicket, tarefa.id);
+          await delay(DELAY_TAREFA_MIN, DELAY_TAREFA_MAX);
+        }
       }
-      return bearer;
-      
-    } catch (e) {
-      console.error('Falha ao obter bearer do usuário:', e);
-      return null;
-    }
-  }
-
-  function montarHeaders(antiCsrf, bearer) {
-    const h = { 'Accept': 'application/json' };
-    if (antiCsrf) h['x-sml-antiforgerytoken'] = antiCsrf;
-    if (bearer)   h['Authorization'] = `Bearer ${bearer}`;
-    return h;
-  }
-
-  //  tudo dentro do escopo async, agora o await é permitido
-  const anti = getAntiCsrfFromDom();
-  const bearer = await getUserBearerToken(); 
-  const headers = montarHeaders(anti, bearer);
-  const base = "https://hmlraizeducacao.zeev.it"  // (ajustado para ambiente de homologação) para que seja dinâmico adicione >> window.location.origin;
-  
-// URL base da API de tarefas
-const urlTarefas = `${base}/api/2/assignments/`;
-
-try {
-  // Buscar as tarefas
-  const resposta = await fetch(urlTarefas, { method: "GET", headers, credentials: "include" });
-  if (!resposta.ok) {
-    console.error(" Erro ao buscar tarefas:", resposta.status, resposta.statusText);
-    return;
-  }
-
-  const dados = await resposta.json();
-  console.log(" Dados recebidos:", dados);
-
-  // Função para verificar se a tarefa está atrasada há mais de 1 dia
-  function slaAtrasada(expirationDateTime, limiteEmDias = 1) {
-    if (!expirationDateTime) return false;
-
-    const dataExpiracao = new Date(expirationDateTime);
-    if (isNaN(dataExpiracao)) {
-      console.log(" Data de expiração inválida:", expirationDateTime);
-      return false;
+    } catch (err) {
+      log(`⚠️ Erro ao processar etapa do ticket.raiz: ${err.message}`, "WARN");
     }
 
-    const dataAtual = new Date();
-    const diferencaEmDias = (dataAtual - dataExpiracao) / (1000 * 60 * 60 * 24);
-
-    // Log detalhado da diferença
-    console.log(
-      ` Tarefa expira em: ${dataExpiracao.toLocaleString()} | Hoje: ${dataAtual.toLocaleString()} | ` +
-      `Diferença: ${diferencaEmDias.toFixed(2)} dias | Limite: ${limiteEmDias} dia(s)`
-    );
-
-    return diferencaEmDias > limiteEmDias;
+    log("✅ Automação concluída com sucesso.");
+  } catch (e) {
+    log(`💥 Erro geral: ${e.message}`, "ERRO");
+  }
 }
 
-  // Filtra apenas tarefas “Avaliar atendimento” atrasadas há mais de 1 dia
-    const tarefasEncontradas = dados.filter(t =>
-      t.taskName?.trim() === "Avaliar atendimento" &&
-      t.late === true &&
-      slaAtrasada(t.expirationDateTime)
-    );
-
-    if (tarefasEncontradas.length === 0) {
-      console.log(" Nenhuma tarefa 'Avaliar atendimento' com mais de 1 dia de atraso encontrada.");
-      return;
-    }
-
-    console.log(` ${tarefasEncontradas.length} tarefas encontradas com mais de 1 dia de atraso.`);
-
-  // Configurações
-  const tokenResponsavel = "087FJWX5jKVEHZs8BBa%2FOcf36SKh5gpE1FzOx7GSp6UrT0X5iq5ALc72%2Fv6RIfekiORiQ0PuaHZyq1PgUQ30qmy2EfvRo0Vjr0yx0xniRTUCCf4fU71U5KIMfxozTSh0";
-  const idUsuarioResponsavel = 4101; // ID do usuário que receberá as tarefas no forward
-  const emailParaVerificar  = "ticket.raiz@raizeducacao.com.br";
-
-  for (const tarefa of tarefasEncontradas) {
-    const idTarefa = tarefa.id;
-    const emailResponsavel = tarefa.assignee?.email || "";
-    console.log(` Tarefa ${idTarefa} | responsável atual: ${emailResponsavel}`);
-
-
-    // ETAPA 1 — FORWARD (somente se o e-mail for DIFERENTE)
-
-    if (emailResponsavel !== emailParaVerificar) {
-      const urlForward = `https://hmlraizeducacao.zeev.it/api/2/assignments/forward`;
-      const corpoForward = {
-        newUserId: idUsuarioResponsavel,
-        assignmentsIds: [idTarefa],
-        message: "Reatribuição automática via API"
-      };
-
-      try {
-        const respForward = await fetch(urlForward, {
-          method: "POST",
-          headers: {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${tokenResponsavel}`
-          },
-          body: JSON.stringify(corpoForward),
-          credentials: "include"
-        });
-
-        if (!respForward.ok) {
-          const erroTxt = await respForward.text();
-          console.error(` Erro no forward da tarefa ${idTarefa}:`, erroTxt);
-        } else {
-          console.log(` Forward executado para a tarefa ${idTarefa}.`);
-        }
-      } catch (e) {
-        console.error(` Falha no forward da tarefa ${idTarefa}:`, e);
-      }
-
-      // IMPORTANTE: pela sua regra, NÃO executa PUT aqui.
-      continue;
-    }
-
-
-    // ETAPA 2 — PUT (somente se o e-mail for IGUAL)
-
-    if (emailResponsavel === emailParaVerificar) {
-      const urlPut = `https://hmlraizeducacao.zeev.it/api/2/assignments/${idTarefa}`;
-      const corpoPut = {
-        result: "3",
-        reason: "Por motivo de SLA expirado estamos finalizando automaticamente a tarefa.",
-      };
-
-      try {
-        const respPut = await fetch(urlPut, {
-          method: "PUT",
-          headers: {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${tokenResponsavel}`
-          },
-          body: JSON.stringify(corpoPut),
-          credentials: "include"
-        });
-
-        if (respPut.status === 204) {
-          console.log(` Tarefa ${idTarefa} concluída (204 No Content).`);
-          continue;
-        }
-
-        if (!respPut.ok) {
-          const erroTxt = await respPut.text();
-          console.error(` Erro ao concluir tarefa ${idTarefa}:`, erroTxt);
-          continue;
-        }
-
-        const ct = respPut.headers.get("content-type") || "";
-        const retorno = ct.includes("application/json") ? await respPut.json() : await respPut.text();
-        console.log(` PUT bem-sucedido para ${idTarefa}:`, retorno);
-
-      } catch (e) {
-        console.error(` Falha ao concluir tarefa ${idTarefa}:`, e);
-      }
-    }
-  }
-} catch (erro) {
-  console.error(" Erro geral na execução:", erro);
-}
-}); 
+main();
