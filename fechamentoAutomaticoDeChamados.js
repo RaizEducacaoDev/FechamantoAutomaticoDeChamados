@@ -5,7 +5,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
  
-// 🔧 CONFIGURAÇÕES GERAIS
+// CONFIGURAÇÕES GERAIS
  
 const base = process.env.ZEEV_BASE;
 const tokenTicket = process.env.ZEEV_TOKEN_TICKET;
@@ -21,7 +21,7 @@ const DELAY_USUARIO_MIN = 1000;
 const DELAY_USUARIO_MAX = 1800;
 
  
-// 🪵 SISTEMA DE LOG
+//  SISTEMA DE LOG
  
 const logPath = path.resolve(logFile);
 function timestamp() {
